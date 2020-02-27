@@ -6,19 +6,21 @@
 #include <random>
 #include <cstdio>
 #include <string>
+#include <vector>
 
 #include <fstream>
 #include <climits>
 
-const uint32_t CONST_SIZE_POWER = 8;
+const uint32_t CONST_SIZE_POWER = 5;
 const uint32_t CONST_SIZE = 1 << CONST_SIZE_POWER;
 
-const uint64_t SIMULATION_BATCH_SIZE_POWER = 8;
+const uint64_t SIMULATION_BATCH_SIZE_POWER = 10;
 const uint64_t SIMULATION_BATCH_SIZE = (1 << SIMULATION_BATCH_SIZE_POWER);
-const uint64_t SIMULATION_BATCH_COUNT = 1'000;
+const uint64_t SIMULATION_BATCH_COUNT = 1'024;
 
 #define CALC_TRANSITION_PROB
-#define ITERATE_SNR
+//#define ITERATE_SNR
+//#define DVB_T_XIANG
 
 typedef double coord_t;
 
@@ -35,6 +37,9 @@ treeNode constellationJellema[CONST_SIZE];
 treeNode constellationLarsson[CONST_SIZE];
 
 uint32_t lookupTableJellema[CONST_SIZE];
+
+uint32_t anti_gray_code[CONST_SIZE];
+uint32_t lookup_anti_gray_code[CONST_SIZE];
 
 inline double dist(struct treeNode *a, struct treeNode *b) {
     return (a->I - b->I) * (a->I - b->I) + (a->Q - b->Q) * (a->Q - b->Q);
@@ -62,7 +67,6 @@ bool compareCross(treeNode const& lhs, treeNode const& rhs) {
 }
 
 bool compareCrossInverse(treeNode const& lhs, treeNode const& rhs) {
-    //TODO: pretty sure this is not how I intended it to work
     return (abs(lhs.Q) -  abs(lhs.I))  < (abs(rhs.Q) -  abs(rhs.I));
 }
 
@@ -75,13 +79,189 @@ void createConstellation() {
     double power = 1.0;
 
     double golden_angle = M_PI * (3 - sqrt(5));
-    double scalingFactor = sqrt( (2 * power) / (CONST_SIZE + 1)); //Yes that +1 is intentional don't ask me why, ask Larsson
+    double scalingFactor = sqrt( (2 * power) / (CONST_SIZE + 1)); //Yes that +1 is intentional don't ask me why, ask Larsson, P.s this normalizes power
 
     //Note 1 up to and INCLUDING CONST_SIZE to prevent multiplication with 0
     for (uint32_t i = 1; i <= CONST_SIZE; i++) {
         constellation[i - 1].I = (scalingFactor * sqrt(i) * cos(golden_angle * i));
         constellation[i - 1].Q = (scalingFactor * sqrt(i) * sin(golden_angle * i));
         constellation[i - 1].index = i - 1;
+    }
+}
+
+void createQamConstellation() {
+    for (uint32_t i = 0; i < 4; i++) {
+        for (uint32_t j = 0; j < 4; j++) {
+            int index = i*4 + j;
+            constellation[index].I = 0.5*i - 1;
+            constellation[index].Q = 0.5*j - 1;
+            constellation[index].index = index;
+        }
+    }
+}
+
+uint32_t gray_decode(uint32_t g) {
+    for (uint32_t bit = 1U << 31; bit > 1; bit >>= 1) {
+        if (g & bit) g ^= bit >> 1;
+    }
+    return g;
+}
+
+void generateAntiGrayCode() {
+    for (uint32_t  i = 0; i < CONST_SIZE/2; i++) {
+        uint32_t gray = i ^ (i >> 1);
+        anti_gray_code[i * 2] = gray;
+
+        uint32_t mask = 0xFF'FF'FF'FF;
+
+        uint32_t anti_gray = (mask >> (32 - CONST_SIZE_POWER)) ^ gray;
+
+        anti_gray_code[i * 2 + 1] = anti_gray;
+    }
+
+    for (unsigned int i = 0; i < CONST_SIZE; i++) {
+        //std::cout << "Anti: " << std::bitset<8> (anti_gray_code[i]) << std::endl;
+        lookup_anti_gray_code[i] = anti_gray_code[gray_decode(i)];
+        //std::cout << "Lookup: " << std::bitset<8> (lookup_anti_gray_code[i]) << std::endl;
+    }
+}
+
+void remapAnti(treeNode nodes[]) {
+    for (int i = 0; i < CONST_SIZE; i++) {
+        nodes[i].index = lookup_anti_gray_code[nodes[i].index];
+    }
+}
+
+void createDVBConstellation() {
+    if (CONST_SIZE_POWER != 5) {
+        std::cerr << "DVB requires constellation power to be 5!" << std::endl;
+        exit(-1);
+    }
+
+
+    double r1 = 0.5;
+    double r2 = 2.72 * r1;
+    double r3 = 4.87 * r1;
+
+    for (int i = 0; i < 4; i++) {
+        double baseAngle = M_PI / 4;
+        double angle = baseAngle + 2 * baseAngle * i;
+        constellation[i].I = r1 * cos(angle);
+        constellation[i].Q = r1 * sin(angle);
+    }
+
+    for (int i = 4; i < 16; i++) {
+        double baseAngle = M_PI / 12;
+        double angle = baseAngle + 2 * baseAngle * (i - 4);
+        constellation[i].I = r2 * cos(angle);
+        constellation[i].Q = r2 * sin(angle);
+    }
+
+    for (int i = 16; i < 32; i++) {
+        double baseAngle = M_PI / 16;
+        double angle = 2 * baseAngle * (i - 16);
+        constellation[i].I = r3 * cos(angle);
+        constellation[i].Q = r3 * sin(angle);
+    }
+
+    /*
+    for (int i = 0; i < CONST_SIZE; i++) {
+        constellation[i].index = i;
+    }
+    */
+    //DVB-S2
+
+#ifndef DVB_T_XIANG
+    //Standard DVB-T mapping
+    constellation[0].index = 17;
+    constellation[1].index = 21;
+    constellation[2].index = 23;
+    constellation[3].index = 19;
+
+    constellation[4].index = 16;
+    constellation[5].index = 0;
+    constellation[6].index = 1;
+    constellation[7].index = 5;
+    constellation[8].index = 4;
+    constellation[9].index = 20;
+    constellation[10].index = 22;
+    constellation[11].index = 6;
+    constellation[12].index = 7;
+    constellation[13].index = 3;
+    constellation[14].index = 2;
+    constellation[15].index = 18;
+
+    constellation[16].index = 24;
+    constellation[17].index = 8;
+    constellation[18].index = 25;
+    constellation[19].index = 9;
+    constellation[20].index = 13;
+    constellation[21].index = 29;
+    constellation[22].index = 12;
+    constellation[23].index = 28;
+    constellation[24].index = 30;
+    constellation[25].index = 14;
+    constellation[26].index = 31;
+    constellation[27].index = 15;
+    constellation[28].index = 11;
+    constellation[29].index = 27;
+    constellation[30].index = 10;
+    constellation[31].index = 26;
+
+#else
+
+    //Xiang
+    constellation[0].index = 9;
+    constellation[1].index = 13;
+    constellation[2].index = 15;
+    constellation[3].index = 11;
+
+    constellation[4].index = 25;
+    constellation[5].index = 17;
+    constellation[6].index = 1;
+    constellation[7].index = 5;
+    constellation[8].index = 21;
+    constellation[9].index = 29;
+    constellation[10].index = 31;
+    constellation[11].index = 23;
+    constellation[12].index = 7;
+    constellation[13].index = 3;
+    constellation[14].index = 19;
+    constellation[15].index = 27;
+
+    constellation[16].index = 26;
+    constellation[17].index = 24;
+    constellation[18].index = 16;
+    constellation[19].index = 8;
+    constellation[20].index = 0;
+    constellation[21].index = 4;
+    constellation[22].index = 20;
+    constellation[23].index = 12;
+    constellation[24].index = 28;
+    constellation[25].index = 30;
+    constellation[26].index = 22;
+    constellation[27].index = 6;
+    constellation[28].index = 14;
+    constellation[29].index = 10;
+    constellation[30].index = 2;
+    constellation[31].index = 18;
+    
+
+#endif
+
+    double power = 0;
+
+    for (int i = 0; i < CONST_SIZE; i++) {
+        power += constellation[i].I * constellation[i].I + constellation[i].Q * constellation[i].Q;
+    }
+
+    power = sqrt(power / CONST_SIZE);
+
+    std::cout << "Power: " << power << std::endl;
+
+    for (int i = 0; i < CONST_SIZE; i++) {
+        constellation[i].I /= power;
+        constellation[i].Q /= power;
     }
 }
 
@@ -109,13 +289,13 @@ treeNode* buildTree(treeNode nodes[], int depth, bool invertI, bool invertQ) {
 
     treeNode *node = new treeNode();
 
-
+    /*
     if (depth % 2 == 0) {
         std::sort(nodes, nodes + size, &compareI);
     } else {
         std::sort(nodes, nodes + size, &compareQ);
     }
-
+    */
 
     /*
     if (depth < (CONST_SIZE_POWER/2) ) {
@@ -125,13 +305,13 @@ treeNode* buildTree(treeNode nodes[], int depth, bool invertI, bool invertQ) {
     }
     */
 
-    /*
-    if (depth < 2) {
+
+    if (depth < 1) {
         std::sort(nodes, nodes + size, &compareRadial);
     } else {
         std::sort(nodes, nodes + size, &compareAngle);
     }
-    */
+
 
 
     /*
@@ -164,6 +344,7 @@ treeNode* buildTree(treeNode nodes[], int depth, bool invertI, bool invertQ) {
     treeNode* rightNodes = nodes + halfWayIndex + 1;
 
 
+
     if (depth % 2 == 0) {
         if (invertI) {
             node->leave[1] = buildTree(leftNodes,  depth + 1, invertI, invertQ);
@@ -181,6 +362,7 @@ treeNode* buildTree(treeNode nodes[], int depth, bool invertI, bool invertQ) {
             node->leave[1] = buildTree(rightNodes, depth + 1, invertI, invertQ);
         }
     }
+
 
     return node;
 }
@@ -225,9 +407,15 @@ uint32_t nearestNeightbour(treeNode nodes[], coord_t I, coord_t Q) {
     return indexBest;
 }
 
+
+/*
+ * THIS LOOKUP ONLY WORKS if the labels of the constellation match their index in the array.
+ */
+
 void generateLookup(treeNode nodes[]) {
     for (uint32_t i = 0; i < CONST_SIZE; i++) {
-        lookupTableJellema[i] = nearestNeightbour(nodes, constellation[i].I, constellation[i].Q);
+        lookupTableJellema[i] = nodes[nearestNeightbour(nodes, constellation[i].I, constellation[i].Q)].index;
+        //lookupTableJellema[i] = nearestNeightbour(nodes, constellation[i].I, constellation[i].Q);
     }
 }
 
@@ -265,9 +453,33 @@ void printTree(treeNode* node) {
 
 void printConstellation(treeNode nodes[]) {
     for (uint32_t i = 0; i < CONST_SIZE; i++) {
-        std::cout << nodes[i].I << ","<<nodes[i].Q << "," << nodes[i].index << std::endl;
+        std::bitset<CONST_SIZE_POWER> x(nodes[i].index);
+        std::cout << nodes[i].I << ","<<nodes[i].Q << "," << "\"" <<  x  << "\"" << std::endl;
     }
 }
+
+void printMapping(treeNode nodes[]) {
+    for (uint32_t i = 0; i < CONST_SIZE; i++) {
+        int mapping = nodes[nearestNeightbour(nodes, constellation[i].I, constellation[i].Q)].index;
+        //std::cout << constellation[i].index << " " << mapping  << std::endl;
+        std::cout << mapping  << std::endl;
+    }
+}
+
+void matlabPrintConstellation(treeNode nodes[]) {
+    for (int currentPoint = 0; currentPoint < CONST_SIZE; currentPoint++) {
+        for(int i = 0; i < CONST_SIZE; i++) {
+            if (nodes[i].index == currentPoint) {
+                if (nodes[i].Q > 0.0 ) {
+                    std::cout << nodes[i].I << " + " << nodes[i].Q << "i" <<std::endl;
+                } else {
+                    std::cout << nodes[i].I << " " << nodes[i].Q << "i" <<std::endl;
+                }
+            }
+        }
+    }
+}
+
 
 double calculateStdDev(std::vector<uint64_t> data) {
     double mean = 0;
@@ -283,7 +495,12 @@ double calculateStdDev(std::vector<uint64_t> data) {
 }
 
 int main() {
-    createConstellation();
+    //createConstellation();
+    generateAntiGrayCode();
+    createDVBConstellation();
+    //remapAnti(constellation);
+    matlabPrintConstellation(constellation);
+
     std::cout << "creating mapping" << std::endl;
     std::copy(std::begin(constellation), std::end(constellation), std::begin(constellationJellema));
     std::copy(std::begin(constellation), std::end(constellation), std::begin(constellationLarsson));
@@ -294,12 +511,18 @@ int main() {
     std::cout << "numbering nodes" << std::endl;
     numberTree(rootNode);
 
-    //printConstellation(constellationJellema);
+    //remapAnti(constellationJellema);
+    //matlabPrintConstellation(constellationJellema);
+
+    printConstellation(constellationJellema);
 
     generateLookup(constellationJellema);
+    printMapping(constellationJellema);
 
     //std::cout << "printing nodes" << std::endl;
     //printTree(rootNode);
+
+
 
 #ifdef ITERATE_SNR
     int begin = -5;
@@ -313,10 +536,10 @@ int main() {
         double SNR = pow(10, SNR_dB / 10);
 
 #else
-        double SNR_dB = 5;
+        double SNR_dB = 15;
         double SNR = pow(10, SNR_dB / 10);
 #endif
-        std::cout << "simulating SNR[dB]: " << SNR_dB << std::endl;
+        //std::cout << "simulating SNR[dB]: " << SNR_dB << std::endl;
 
         double mean = 0.0;
         double stddev = 1.0 / SNR;
@@ -379,7 +602,8 @@ int main() {
         double bitErrorLarssonStdDev = calculateStdDev(errorCountBitLarsson);
         double bitErrorJellemaStdDev = calculateStdDev(errorCountBitJellema);
 
-        /*
+
+#ifndef ITERATE_SNR
         printf("Symbol errors:     %20.3f %10.3f %10.3f%%\n", symbolErrorMean, symbolErrorStdDev,
                (symbolErrorMean * 100.0) / SIMULATION_BATCH_SIZE);
         printf("Bit error Larsson: %20.3f %10.3f %10.3f%% %10.3f\n", bitErrorLarssonMean, bitErrorLarssonStdDev,
@@ -388,7 +612,8 @@ int main() {
         printf("Bit error Jellema: %20.3f %10.3f %10.3f%% %10.3f\n", bitErrorJellemaMean, bitErrorJellemaStdDev,
                (bitErrorJellemaMean * 100.0) / (SIMULATION_BATCH_SIZE * CONST_SIZE_POWER),
                (bitErrorJellemaStdDev * 100.0) / (SIMULATION_BATCH_SIZE * CONST_SIZE));
-       */
+#else
+
         printf("%.*f,%.*f,%.*f,%.*f,%.*f,%.*f,%.*f,%.*f,%.*f,%.*f\n",
                 12, SNR_dB,
                 12, symbolErrorMean / SIMULATION_BATCH_SIZE,
@@ -402,6 +627,7 @@ int main() {
                 12, bitErrorJellemaMean,
                 12, bitErrorJellemaStdDev
         );
+#endif
 
 #ifdef ITERATE_SNR
     }
@@ -410,26 +636,25 @@ int main() {
 #else
 
         std::ofstream probabilities;
-        //std::ofstream mapping;
+        std::ofstream mapping;
 
         char snr_string[256];
 
         sprintf(snr_string, "%.3f", SNR_dB);
 
-        std::string filename = "test_" + std::to_string(CONST_SIZE_POWER) + std::string() + "__" + snr_string;
+        std::string filename = "test_" + std::to_string(CONST_SIZE_POWER) + "__" + snr_string;
 
         probabilities.open(filename, std::ios::out | std::ios::binary);
-        //mapping.open("mapping_8_test.bin", std::ios::out | std::ios::binary);
+        mapping.open("mapping_" + std::to_string(CONST_SIZE_POWER) + "_Jellema_anti_2.bin", std::ios::out | std::ios::binary);
 
         std::vector<uint32_t> receivedSymbol;
         receivedSymbol.reserve(CONST_SIZE);
 
         for (uint32_t i = 0; i < CONST_SIZE; i++) {
             receivedSymbol.push_back(0);
-            //mapping.write(reinterpret_cast<char*>(&lookupTableJellema[i]), sizeof(uint32_t));
+            mapping.write(reinterpret_cast<char*>(&lookupTableJellema[i]), sizeof(uint32_t));
+            //mapping.write(reinterpret_cast<char*>(&i), sizeof(uint32_t));
         }
-
-
 
         for (uint64_t symbol = 0; symbol < CONST_SIZE; symbol++) {
             std::cout << "Running symbol: " << (symbol + 1) << " out of " << CONST_SIZE << std::endl;
@@ -458,7 +683,7 @@ int main() {
 
         probabilities.close();
 
-        //mapping.close();
+        mapping.close();
 
 #ifdef ITERATE_SNR
     }
